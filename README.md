@@ -24,17 +24,29 @@ while it runs.
 
 ## Quick start
 
+`run.sh` is meant to run **inside the VM** whose kernel you want to test: it
+builds the modules against the current kernel and loads them right there (it
+does not spawn its own VM). So boot the kernel first, then run it at the guest
+shell:
+
 ```sh
-# Build + boot + run everything (defaults: KDIR=/home/leit/Devel/linux-next, x86_64)
-./run.sh
+# 1. On the host, boot the kernel under test (host FS is visible via --rw):
+virtme-ng --run /home/leit/Devel/linux-next --disable-microvm \
+    --memory 4G --cpu 8 --rw --user root \
+    --qemu /usr/local/bin/qemu-system-x86_64
 
-# Point at a different tree / arch:
-make KDIR=/path/to/linux ARCH=x86_64
-KDIR=/path/to/linux ./run.sh
-
-# Full (long) torture + perf instead of the quick default:
-QUICK=0 ./run.sh
+# 2. At the guest shell:
+cd /home/leit/Devel/wq_testsuite
+./run.sh                     # quick run
+QUICK=0 ./run.sh             # full (long) torture + perf
+KDIR=/path/to/linux ./run.sh # override the build tree
+LLVM=1 ./run.sh              # build the modules with clang
 ```
+
+`KDIR` defaults to `/lib/modules/$(uname -r)/build` when present, otherwise
+`/home/leit/Devel/linux-next`; it must match the running kernel (module
+vermagic). You can build the modules on the host ahead of time with `make`, but
+they must be loaded inside a VM.
 
 Expected output:
 
@@ -88,8 +100,7 @@ always non-zero because of the `-EAGAIN`).
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
 wqt_NN_*.c          the 10 test modules
 Kbuild / Makefile   out-of-tree module build
-guest.sh            runs inside the guest: insmod each module, emit TAP
-run.sh              host: build, boot virtme-ng, collect results
+run.sh              in-VM: build against the current kernel, load each module, emit TAP
 ```
 
 ## Adding a test
@@ -97,4 +108,4 @@ run.sh              host: build, boot virtme-ng, collect results
 1. Create `wqt_NN_name.c`, include `"wqtest.h"`, do your checks in
    `module_init()` between `WQT_INIT(NN, "name")` and `return WQT_FINISH();`.
 2. Add `obj-m += wqt_NN_name.o` to `Kbuild`.
-3. (Optional) give it quick/full module params in `guest.sh`'s `case "$id"`.
+3. (Optional) give it quick/full module params in `run.sh`'s `case "$id"`.
