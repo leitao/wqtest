@@ -1,6 +1,6 @@
 # wq_testsuite — Linux workqueue self-tests
 
-A standalone suite of 16 correctness tests for the Linux kernel **workqueue**
+A standalone suite of 22 tests for the Linux kernel **workqueue**
 subsystem. Each test is a small out-of-tree kernel module that exercises the
 workqueue API and self-checks its behaviour; a runner boots the target kernel
 under [virtme-ng](https://github.com/arighi/virtme-ng), loads every module, and
@@ -51,12 +51,12 @@ they must be loaded inside a VM.
 Expected output:
 
 ```
-1..16
+1..22
 ok 1 - basic
 ok 2 - ordered
 ...
-ok 16 - blocking_progress
-# passed 16/16
+ok 22 - timeout
+# passed 22/22
 ALL TESTS PASSED
 ```
 
@@ -83,6 +83,12 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 14| `wqt_14_set_max_active`| `workqueue_set_max_active` raises/lowers live concurrency; peak honours the current cap |
 | 15| `wqt_15_cancel_delayed`| async `cancel_delayed_work` return values + `delayed_work_pending`; `queue_delayed_work_on` cpu binding |
 | 16| `wqt_16_blocking_progress` | a batch queued behind a blocked worker on an unbound wq still drains (no pool stall) |
+| 17| `wqt_17_probe_on_node`  | run one-shot init on a target CPU/node via `queue_work_on`+`flush_work` and `work_on_cpu` (pci/cpufreq idiom) |
+| 18| `wqt_18_vmstat_shepherd`| per-cpu delayed work that re-arms itself while work remains + a shepherd that kicks idle cpus (vmstat idiom) |
+| 19| `wqt_19_rcu_free`       | RCU-published refcounted object freed via `queue_rcu_work` after its last ref drops (aio idiom) |
+| 20| `wqt_20_highpri`        | `WQ_HIGHPRI` work runs ahead of a normal-priority backlog on the same cpu (i915/kfd idiom) |
+| 21| `wqt_21_irq_bh`         | top-half `schedule_work` → bottom-half drains events in task context; kicks coalesce (tty/input idiom) |
+| 22| `wqt_22_timeout`        | `delayed_work` deadline armed on issue, cancelled on completion, fires on stall (nvme idiom) |
 
 ### Tests 11–16 in detail
 
@@ -125,6 +131,48 @@ The newer tests widen coverage beyond the basics above:
   the exact class of stall a long-blocking handler (e.g. KFENCE's
   `toggle_allocation_gate`) can expose; `WQ_WATCHDOG` is the second oracle.
 
+### Tests 17–22: modeled on real workqueue users
+
+These reproduce, in miniature, how specific in-tree subsystems actually use
+workqueues — one idiom per test, each citing the code it mirrors:
+
+* **`wqt_17_probe_on_node`** — running one-shot init on a CPU local to a device,
+  after `drivers/pci/pci-driver.c:pci_call_probe()` (queue an on-stack work on a
+  node-local CPU, `flush_work()`, read back the return) and
+  `drivers/cpufreq/powernow-k8.c` (`work_on_cpu()`). Asserts the work ran on the
+  requested node/CPU and its return value propagated.
+
+* **`wqt_18_vmstat_shepherd`** — after `mm/vmstat.c`. Each CPU has a deferrable
+  `delayed_work` (`vmstat_update`) that folds pending per-cpu work and re-queues
+  *itself* on the same CPU while more remains, disarming when quiescent; a
+  shepherd (`vmstat_shepherd`) kicks CPUs that have work but no worker running.
+  Asserts everything drains, workers self-disarm (no runaway re-queue), and
+  teardown cancels cleanly.
+
+* **`wqt_19_rcu_free`** — after `fs/aio.c` (`free_ioctx`). An RCU-published,
+  refcounted object is looked up under `rcu_read_lock()` with
+  `refcount_inc_not_zero()`; when its last ref drops it is freed via
+  `queue_rcu_work()` so the free waits a grace period and runs in process
+  context. A reader kthread races the teardown; the object must be freed exactly
+  once with no use-after-free (KASAN is the oracle).
+
+* **`wqt_20_highpri`** — after the `WQ_HIGHPRI` queues in
+  `drivers/gpu/drm/i915/display` (page flips) and amdkfd (interrupt handling).
+  A normal per-cpu pool is flooded with slow work and a high-priority item is
+  queued behind it on the same CPU; the highpri item must run without waiting
+  for the whole normal backlog.
+
+* **`wqt_21_irq_bh`** — the top-half/bottom-half deferral used by
+  `drivers/tty/tty_buffer.c` (`flush_to_ldisc`) and input drivers: an atomic
+  "ISR" buffers an event and `schedule_work()`s a bottom half that drains all
+  buffered events in process context. Asserts every event is consumed exactly
+  once, the bottom half runs in task context, and repeated kicks coalesce.
+
+* **`wqt_22_timeout`** — after `drivers/nvme/host/core.c` (`nvme_failfast_work`,
+  keep-alive). A `delayed_work` deadline is armed when a command is issued and
+  cancelled on the happy path; it fires only when the command stalls. A cmpxchg
+  state machine makes the completion/timeout race resolve to one winner.
+
 ## How a test reports its result
 
 Each module does all its work in `module_init()`, cleans up the workqueues it
@@ -145,7 +193,7 @@ always non-zero because of the `-EAGAIN`).
 
 ```
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
-wqt_NN_*.c          the 16 test modules
+wqt_NN_*.c          the 22 test modules
 Kbuild / Makefile   out-of-tree module build
 run.sh              in-VM: build against the current kernel, load each module, emit TAP
 ```
