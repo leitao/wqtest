@@ -84,6 +84,47 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 15| `wqt_15_cancel_delayed`| async `cancel_delayed_work` return values + `delayed_work_pending`; `queue_delayed_work_on` cpu binding |
 | 16| `wqt_16_blocking_progress` | a batch queued behind a blocked worker on an unbound wq still drains (no pool stall) |
 
+### Tests 11–16 in detail
+
+The newer tests widen coverage beyond the basics above:
+
+* **`wqt_11_flush`** — the `flush_work()` contract. Queues an item that sleeps
+  for a fixed 300 ms and asserts that `flush_work()` blocks for the whole
+  duration and returns `true` (it had to wait), that the item has finished by
+  the time it returns (flush orders *after* completion), and that flushing an
+  idle or already-completed item returns `false` immediately.
+
+* **`wqt_12_drain`** — queue idempotency and chain draining. A `work_struct`
+  has a single pending slot, so queuing an item that is already pending (held
+  behind a blocker on a `max_active=1` wq) returns `false` and the item still
+  runs exactly once. Separately, a finite self-requeuing item is queued once
+  and `drain_workqueue()` must run the whole chain before it returns — coverage
+  that plain `flush_workqueue()` would not follow.
+
+* **`wqt_13_rcu_work`** — deferred execution via RCU. `queue_rcu_work()` runs
+  the item only after a full grace period; the test checks it runs exactly
+  once, that `flush_rcu_work()` waits for it (grace period included), and that
+  the same `rcu_work` can be re-queued after it has run.
+
+* **`wqt_14_set_max_active`** — the concurrency cap can change on a live wq.
+  Starting at `max_active=1` the observed peak concurrency is 1; after
+  `workqueue_set_max_active(wq, 4)` the peak climbs above 1 while never
+  exceeding 4; lowering it back to 1 serialises the wq again. Concurrency is
+  measured with a live-counter peak, as in `wqt_03`.
+
+* **`wqt_15_cancel_delayed`** — the async (non-`_sync`) delayed-cancel path.
+  On a delayed item whose timer is still armed, `cancel_delayed_work()` returns
+  `true`, clears `delayed_work_pending()` and the item never runs; on an idle
+  item it returns `false`. Also checks that `queue_delayed_work_on(cpu, …)`
+  binds execution to the requested CPU.
+
+* **`wqt_16_blocking_progress`** — the forward-progress guarantee. One worker
+  is parked in a wait on an unbound wq with default `max_active`, a batch is
+  queued behind it, and that batch must finish *while the blocker is still
+  parked* — the pool has to grow/wake another worker rather than stall. This is
+  the exact class of stall a long-blocking handler (e.g. KFENCE's
+  `toggle_allocation_gate`) can expose; `WQ_WATCHDOG` is the second oracle.
+
 ## How a test reports its result
 
 Each module does all its work in `module_init()`, cleans up the workqueues it
