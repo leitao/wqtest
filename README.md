@@ -1,6 +1,6 @@
 # wq_testsuite — Linux workqueue self-tests
 
-A standalone suite of 10 correctness tests for the Linux kernel **workqueue**
+A standalone suite of 16 correctness tests for the Linux kernel **workqueue**
 subsystem. Each test is a small out-of-tree kernel module that exercises the
 workqueue API and self-checks its behaviour; a runner boots the target kernel
 under [virtme-ng](https://github.com/arighi/virtme-ng), loads every module, and
@@ -51,12 +51,12 @@ they must be loaded inside a VM.
 Expected output:
 
 ```
-1..10
+1..16
 ok 1 - basic
 ok 2 - ordered
 ...
-ok 10 - perf
-# passed 10/10
+ok 16 - blocking_progress
+# passed 16/16
 ALL TESTS PASSED
 ```
 
@@ -77,6 +77,12 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 8 | `wqt_08_flags_matrix`  | per-cpu/unbound × HIGHPRI × CPU_INTENSIVE × FREEZABLE × MEM_RECLAIM all create/run/destroy cleanly |
 | 9 | `wqt_09_torture`       | many threads queue/cancel/flush/drain concurrently; `accepted == executed + cancelled`; ordered never overlaps; no splat |
 | 10| `wqt_10_perf`          | queue_work throughput + p50/p90/p99 latency (per-cpu vs unbound across affinity scopes); gates on no lost items |
+| 11| `wqt_11_flush`         | `flush_work` blocks until a running item completes and returns true; false for an idle item |
+| 12| `wqt_12_drain`         | double-`queue_work` of a pending item is rejected/runs once; `drain_workqueue` drains a self-requeuing chain |
+| 13| `wqt_13_rcu_work`      | `queue_rcu_work`/`flush_rcu_work` run after a grace period, exactly once, and are re-queueable |
+| 14| `wqt_14_set_max_active`| `workqueue_set_max_active` raises/lowers live concurrency; peak honours the current cap |
+| 15| `wqt_15_cancel_delayed`| async `cancel_delayed_work` return values + `delayed_work_pending`; `queue_delayed_work_on` cpu binding |
+| 16| `wqt_16_blocking_progress` | a batch queued behind a blocked worker on an unbound wq still drains (no pool stall) |
 
 ## How a test reports its result
 
@@ -98,7 +104,7 @@ always non-zero because of the `-EAGAIN`).
 
 ```
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
-wqt_NN_*.c          the 10 test modules
+wqt_NN_*.c          the 16 test modules
 Kbuild / Makefile   out-of-tree module build
 run.sh              in-VM: build against the current kernel, load each module, emit TAP
 ```
