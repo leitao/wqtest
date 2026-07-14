@@ -17,7 +17,6 @@
 
 struct cpu_item {
 	struct work_struct work;
-	int target;
 	int ran_on;
 };
 
@@ -51,7 +50,6 @@ static int __init wqt_07_init(void)
 	}
 
 	for_each_online_cpu(cpu) {
-		citems[cpu].target = cpu;
 		citems[cpu].ran_on = -1;
 		INIT_WORK(&citems[cpu].work, cpu_fn);
 		WQT_CHECK(queue_work_on(cpu, wq, &citems[cpu].work),

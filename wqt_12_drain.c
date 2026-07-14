@@ -15,7 +15,6 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/completion.h>
-#include <linux/delay.h>
 #include "wqtest.h"
 
 #define CHAIN_LEN 6

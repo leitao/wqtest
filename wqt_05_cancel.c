@@ -19,7 +19,6 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/completion.h>
-#include <linux/delay.h>
 #include "wqtest.h"
 
 static struct work_struct cw;		/* work under test */

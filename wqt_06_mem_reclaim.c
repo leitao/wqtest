@@ -16,7 +16,6 @@
 #include <linux/atomic.h>
 #include <linux/completion.h>
 #include <linux/wait.h>
-#include <linux/delay.h>
 #include "wqtest.h"
 
 #define NR_BASIC  32

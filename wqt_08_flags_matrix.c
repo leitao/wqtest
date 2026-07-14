@@ -14,7 +14,6 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <linux/wait.h>
-#include <linux/delay.h>
 #include "wqtest.h"
 
 #define NR_ITEMS 8
