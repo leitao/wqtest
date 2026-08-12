@@ -1,6 +1,6 @@
 # wq_testsuite — Linux workqueue self-tests
 
-A standalone suite of 22 tests for the Linux kernel **workqueue**
+A standalone suite of 25 tests for the Linux kernel **workqueue**
 subsystem. Each test is a small out-of-tree kernel module that exercises the
 workqueue API and self-checks its behaviour; a runner boots the target kernel
 under [virtme-ng](https://github.com/arighi/virtme-ng), loads every module, and
@@ -51,12 +51,12 @@ they must be loaded inside a VM.
 Expected output:
 
 ```
-1..22
+1..25
 ok 1 - basic
 ok 2 - ordered
 ...
-ok 22 - timeout
-# passed 22/22
+ok 25 - nr_active_paths
+# passed 25/25
 ALL TESTS PASSED
 ```
 
@@ -89,6 +89,9 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 20| `wqt_20_highpri`        | `WQ_HIGHPRI` work runs ahead of a normal-priority backlog on the same cpu (i915/kfd idiom) |
 | 21| `wqt_21_irq_bh`         | top-half `schedule_work` → bottom-half drains events in task context; kicks coalesce (tty/input idiom) |
 | 22| `wqt_22_timeout`        | `delayed_work` deadline armed on issue, cancelled on completion, fires on stall (nvme idiom) |
+| 23| `wqt_23_congested`     | `workqueue_congested()` is false when idle, true behind a full active slot, false again once drained |
+| 24| `wqt_24_percpu_pwq`    | per-cpu pwq per cpu for normal/highpri/BH pools: items run on the cpu they were queued to; wq churn |
+| 25| `wqt_25_nr_active_paths`| `max_active` raise/lower and a cpu offline/online with work in flight, per-cpu and unbound |
 
 ### Tests 11–16 in detail
 
@@ -173,6 +176,36 @@ workqueues — one idiom per test, each citing the code it mirrors:
   cancelled on the happy path; it fires only when the command stalls. A cmpxchg
   state machine makes the completion/timeout race resolve to one winner.
 
+### Tests 23–25: pwq slots, congestion and nr_active
+
+* **`wqt_23_congested`** — the `workqueue_congested()` contract. An idle
+  workqueue is congested on no cpu; with the single active slot of a
+  `max_active=1` wq held by a parked item and a backlog behind it, the cpu that
+  backlog was queued to reports congested (and, on a per-cpu wq, an idle cpu
+  does not); after the drain it is clear again. The query is also issued from
+  worker context and from inside an `rcu_read_lock()` section. It reads the
+  RCU-protected `wq->cpu_pwq[]` slot with only preemption disabled, so on a
+  `PROVE_RCU` kernel a mismatched accessor there splats "suspicious
+  rcu_dereference_check() usage" and the runner's splat scan fails the test.
+
+* **`wqt_24_percpu_pwq`** — the per-cpu pwq slots themselves. One item per
+  online cpu on a normal per-cpu wq, a `WQ_HIGHPRI` one and a `WQ_BH` one (the
+  three static per-cpu pools), plus an unbound wq for contrast; each item must
+  run on the cpu it was queued to. Then 32 short-lived per-cpu workqueues are
+  created, used and destroyed back to back so the install and teardown of those
+  slots runs many times over, with KASAN and debugobjects as the oracle. The BH
+  variant gets its own `work_struct`s: it runs in softirq while the others run
+  in task context, and `INIT_WORK()` takes the work's lockdep class from its
+  call site.
+
+* **`wqt_25_nr_active_paths`** — the paths that recompute an unbound wq's
+  per-node nr_active budget, which a per-cpu wq must stay out of. With a parked
+  item and a backlog queued, `max_active` is raised and lowered; then a batch is
+  queued to a cpu which is immediately offlined and brought back. Work queued to
+  a cpu that goes away still has to run, and the re-onlined cpu has to take work
+  on its own pwq again. Needs `CONFIG_HOTPLUG_CPU` and a second cpu; the hotplug
+  phase is skipped with a diagnostic otherwise.
+
 ## How a test reports its result
 
 Each module does all its work in `module_init()`, cleans up the workqueues it
@@ -193,7 +226,7 @@ always non-zero because of the `-EAGAIN`).
 
 ```
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
-wqt_NN_*.c          the 22 test modules
+wqt_NN_*.c          the 25 test modules
 Kbuild / Makefile   out-of-tree module build
 run.sh              in-VM: build against the current kernel, load each module, emit TAP
 ```

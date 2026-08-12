@@ -27,3 +27,6 @@ obj-m += wqt_19_rcu_free.o
 obj-m += wqt_20_highpri.o
 obj-m += wqt_21_irq_bh.o
 obj-m += wqt_22_timeout.o
+obj-m += wqt_23_congested.o
+obj-m += wqt_24_percpu_pwq.o
+obj-m += wqt_25_nr_active_paths.o
