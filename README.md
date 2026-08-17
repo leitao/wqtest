@@ -24,29 +24,32 @@ while it runs.
 
 ## Quick start
 
-`run.sh` is meant to run **inside the VM** whose kernel you want to test: it
-builds the modules against the current kernel and loads them right there (it
-does not spawn its own VM). So boot the kernel first, then run it at the guest
-shell:
+Building and running are two separate scripts. `build.sh` builds the modules
+against a kernel tree and can run anywhere; `test.sh` must run **inside the VM**
+whose kernel you want to test, because it loads the modules into the running
+kernel (it does not spawn its own VM).
 
 ```sh
-# 1. On the host, boot the kernel under test (host FS is visible via --rw):
+# 1. Build the modules (host or guest):
+./build.sh                     # against the default tree, with clang
+KDIR=/path/to/linux ./build.sh # override the build tree
+LLVM= ./build.sh               # build with gcc instead
+
+# 2. On the host, boot the kernel under test (host FS is visible via --rw):
 virtme-ng --run /home/leit/Devel/linux-next --disable-microvm \
     --memory 4G --cpu 8 --rw --user root \
     --qemu /usr/local/bin/qemu-system-x86_64
 
-# 2. At the guest shell:
+# 3. At the guest shell:
 cd /home/leit/Devel/wq_testsuite
-./run.sh                     # quick run
-QUICK=0 ./run.sh             # full (long) torture + perf
-KDIR=/path/to/linux ./run.sh # override the build tree
-LLVM=1 ./run.sh              # build the modules with clang
+./test.sh                    # quick run
+QUICK=0 ./test.sh            # full (long) torture + perf
 ```
 
 `KDIR` defaults to `/lib/modules/$(uname -r)/build` when present, otherwise
-`/home/leit/Devel/linux-next`; it must match the running kernel (module
-vermagic). You can build the modules on the host ahead of time with `make`, but
-they must be loaded inside a VM.
+`/home/leit/Devel/linux-next`; it must match the kernel `test.sh` runs on
+(module vermagic). Both steps can also be driven from the Makefile: `make`
+builds, `make test` runs, `make run` does both.
 
 Expected output:
 
@@ -218,7 +221,7 @@ WQT-RESULT <id> <name> : PASS
 WQT-RESULT <id> <name> : FAIL (<reason>)
 ```
 
-`guest.sh` maps that (plus a scan for kernel splats in the same window) to an
+`test.sh` maps that (plus a scan for kernel splats in the same window) to an
 `ok`/`not ok` TAP line. `insmod`'s exit status is intentionally ignored (it is
 always non-zero because of the `-EAGAIN`).
 
@@ -228,7 +231,8 @@ always non-zero because of the `-EAGAIN`).
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
 wqt_NN_*.c          the 25 test modules
 Kbuild / Makefile   out-of-tree module build
-run.sh              in-VM: build against the current kernel, load each module, emit TAP
+build.sh            build the modules against $KDIR (host or guest)
+test.sh             in-VM: load each module into the running kernel, emit TAP
 ```
 
 ## Adding a test
@@ -236,4 +240,4 @@ run.sh              in-VM: build against the current kernel, load each module, e
 1. Create `wqt_NN_name.c`, include `"wqtest.h"`, do your checks in
    `module_init()` between `WQT_INIT(NN, "name")` and `return WQT_FINISH();`.
 2. Add `obj-m += wqt_NN_name.o` to `Kbuild`.
-3. (Optional) give it quick/full module params in `run.sh`'s `case "$id"`.
+3. (Optional) give it quick/full module params in `test.sh`'s `case "$id"`.
