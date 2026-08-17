@@ -30,3 +30,5 @@ obj-m += wqt_22_timeout.o
 obj-m += wqt_23_congested.o
 obj-m += wqt_24_percpu_pwq.o
 obj-m += wqt_25_nr_active_paths.o
+obj-m += wqt_26_pool_backing.o
+obj-m += wqt_27_percpu_lifecycle.o

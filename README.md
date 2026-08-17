@@ -1,6 +1,6 @@
 # wq_testsuite — Linux workqueue self-tests
 
-A standalone suite of 25 tests for the Linux kernel **workqueue**
+A standalone suite of 27 tests for the Linux kernel **workqueue**
 subsystem. Each test is a small out-of-tree kernel module that exercises the
 workqueue API and self-checks its behaviour; a runner boots the target kernel
 under [virtme-ng](https://github.com/arighi/virtme-ng), loads every module, and
@@ -54,12 +54,12 @@ builds, `make test` runs, `make run` does both.
 Expected output:
 
 ```
-1..25
+1..27
 ok 1 - basic
 ok 2 - ordered
 ...
-ok 25 - nr_active_paths
-# passed 25/25
+ok 27 - percpu_lifecycle
+# passed 27/27
 ALL TESTS PASSED
 ```
 
@@ -95,6 +95,8 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 23| `wqt_23_congested`     | `workqueue_congested()` is false when idle, true behind a full active slot, false again once drained |
 | 24| `wqt_24_percpu_pwq`    | per-cpu pwq per cpu for normal/highpri/BH pools: items run on the cpu they were queued to; wq churn |
 | 25| `wqt_25_nr_active_paths`| `max_active` raise/lower and a cpu offline/online with work in flight, per-cpu and unbound |
+| 26| `wqt_26_pool_backing`  | a workqueue is served by the kind of pool its flags ask for: per-cpu vs unbound, normal vs highpri, task vs softirq |
+| 27| `wqt_27_percpu_lifecycle`| repeated create/destroy of per-cpu, highpri, BH and unbound queues, some torn down with work still queued |
 
 ### Tests 11–16 in detail
 
@@ -208,6 +210,32 @@ workqueues — one idiom per test, each citing the code it mirrors:
   a cpu that goes away still has to run, and the re-onlined cpu has to take work
   on its own pwq again. Needs `CONFIG_HOTPLUG_CPU` and a second cpu; the hotplug
   phase is skipped with a diagnostic otherwise.
+
+### Tests 26–27: which pool backs a workqueue
+
+* **`wqt_26_pool_backing`** — a pwq points at either one of the static per-cpu
+  pools or a hashed unbound pool, and the flags are what choose. The other
+  tests check *where* work runs; this one checks *what* it runs on, because an
+  unbound pool serving a `WQ_PERCPU` queue still lands on the right cpu
+  whenever the scheduler leaves it there, and differs only in concurrency
+  management and worker identity. The oracle is the worker's name:
+  `format_worker_id()` spells a per-cpu pool worker `kworker/<cpu>:<id>`,
+  suffixed `H` when the pool's nice is negative, and an unbound pool worker
+  `kworker/u<pool_id>:<id>`, so the item reads `current->comm` and
+  `task_nice()` back. Six variants are covered — per-cpu, per-cpu highpri,
+  unbound, unbound highpri, BH and BH highpri. BH items run from softirq on the
+  interrupted task, so those are checked for softirq context and cpu only.
+
+* **`wqt_27_percpu_lifecycle`** — volume through the install and release
+  paths. Creating a workqueue allocates a pwq for every possible cpu and
+  installs it; destroying one releases them through `pwq_release_workfn()`,
+  which has to tell a refcounted unbound pool from a static per-cpu one.
+  `wqt_24` churns plain `WQ_PERCPU`; this adds the highpri, freezable, BH and
+  unbound variants and destroys half the queues with work still pending so the
+  drain path runs. It asserts little beyond "every item ran" — a pwq freed
+  twice, a pool refcount driven negative or a leaked pwq surfaces in KASAN,
+  debugobjects or lockdep rather than in an assertion. `rounds=` sets the
+  create/destroy count per variant (default 24).
 
 ## How a test reports its result
 
