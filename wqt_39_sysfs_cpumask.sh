@@ -26,10 +26,32 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 
 SCOPES="cpu smt cache cache_shard numa system"
 
-# Strip the grouping commas and leading zeros "%*pb" pads a mask with, so a
-# readback can be compared against a mask we built with printf '%x'.
+# Strip the grouping commas and leading zeros "%*pb" pads a mask with, so two
+# spellings of the same mask can be compared.  Only ever use this on a value
+# being compared, never on one being written: cpumask_parse() needs the commas.
 norm_mask() {
 	echo "$1" | tr -d ',' | tr 'A-Z' 'a-z' | sed 's/^0*//; s/^$/0/'
+}
+
+# cpu_mask <cpu>... -- the hex spelling cpumask_parse() takes for a set of
+# cpus, sized to cover $last_cpu.  It has to be assembled a 32-bit group at a
+# time for two reasons: shell arithmetic is 64-bit, so "1 << 71" silently
+# comes back as "1 << 7", and cpumask_parse() reads at most eight hex digits
+# per comma-separated group, so one long unbroken string is -EOVERFLOW.
+cpu_mask() {
+	_ngroups=$((last_cpu / 32 + 1))
+	_out=""
+	_g="$_ngroups"
+	while [ "$_g" -gt 0 ]; do
+		_g=$((_g - 1))
+		_v=0
+		for _c in "$@"; do
+			[ $((_c / 32)) -eq "$_g" ] || continue
+			_v=$((_v | (1 << (_c % 32))))
+		done
+		_out="${_out:+$_out,}$(printf '%08x' "$_v")"
+	done
+	echo "$_out"
 }
 
 wqt_init 39 sysfs_cpumask
@@ -71,10 +93,10 @@ cpu_b=$((last_cpu - 1))
 # --- the per-wq cpumask confines the workers -------------------------------
 last_mask=""
 for c in "$cpu_a" "$cpu_b"; do
-	mask=$(printf '%x' $((1 << c)))
+	mask=$(cpu_mask "$c")
 	wqt_write "$U/cpumask" "$mask" "wqh_unbound cpumask" || continue
 	last_mask="$mask"
-	wqt_eq "$(norm_mask "$(cat "$U/cpumask")")" "$mask" \
+	wqt_eq "$(norm_mask "$(cat "$U/cpumask")")" "$(norm_mask "$mask")" \
 		"wqh_unbound: cpumask after writing cpu$c"
 
 	out=$(wqh_probe wqh_unbound)
@@ -86,7 +108,7 @@ done
 
 # Garbage is rejected and leaves the mask alone.
 wqt_write_fails "$U/cpumask" "zz" "wqh_unbound cpumask"
-wqt_eq "$(norm_mask "$(cat "$U/cpumask")")" "$last_mask" \
+wqt_eq "$(norm_mask "$(cat "$U/cpumask")")" "$(norm_mask "$last_mask")" \
 	"wqh_unbound: cpumask changed by a rejected write"
 
 # An all-zero mask does not name a usable cpu.  wqattrs_actualize_cpumask()
@@ -98,7 +120,7 @@ wqt_eq "$(wqh_field "$out" ran)" 64 \
 	"wqh_unbound: work stopped running after an empty cpumask was $empty_ret"
 wqt_diag "an empty per-wq cpumask was $empty_ret; the wq kept running"
 
-wqt_write "$U/cpumask" "$(norm_mask "$ORIG_CPUMASK")" "wqh_unbound cpumask reset"
+wqt_write "$U/cpumask" "$ORIG_CPUMASK" "wqh_unbound cpumask reset"
 
 # --- the global cpumask caps every unbound workqueue -----------------------
 wqt_eq "$(stat -c %a "$WQ_SYS/cpumask_isolated")" 444 \
@@ -106,11 +128,12 @@ wqt_eq "$(stat -c %a "$WQ_SYS/cpumask_isolated")" 444 \
 cat "$WQ_SYS/cpumask_isolated" > /dev/null 2>&1
 wqt_check $? "cpumask_isolated is not readable"
 
-gmask=$(printf '%x' $(( (1 << cpu_a) | 1 )))	# cpu_a and cpu0
+gmask=$(cpu_mask "$cpu_a" 0)
 if wqt_write "$WQ_SYS/cpumask" "$gmask" "global cpumask"; then
-	wqt_eq "$(norm_mask "$(cat "$WQ_SYS/cpumask")")" "$gmask" \
+	wqt_eq "$(norm_mask "$(cat "$WQ_SYS/cpumask")")" "$(norm_mask "$gmask")" \
 		"global cpumask after writing cpu0+cpu$cpu_a"
-	wqt_eq "$(norm_mask "$(cat "$WQ_SYS/cpumask_requested")")" "$gmask" \
+	wqt_eq "$(norm_mask "$(cat "$WQ_SYS/cpumask_requested")")" \
+		"$(norm_mask "$gmask")" \
 		"cpumask_requested should echo the last accepted write"
 
 	# wqh_unbound still asks for every cpu, so only the global cap can
@@ -126,10 +149,10 @@ fi
 # An empty global mask is refused outright -- there would be nowhere to run.
 wqt_write_fails "$WQ_SYS/cpumask" 0 "global cpumask"
 wqt_write_fails "$WQ_SYS/cpumask" zz "global cpumask"
-wqt_eq "$(norm_mask "$(cat "$WQ_SYS/cpumask")")" "$gmask" \
+wqt_eq "$(norm_mask "$(cat "$WQ_SYS/cpumask")")" "$(norm_mask "$gmask")" \
 	"global cpumask changed by a rejected write"
 
-wqt_write "$WQ_SYS/cpumask" "$(norm_mask "$ORIG_CPUMASK")" "global cpumask restore"
+wqt_write "$WQ_SYS/cpumask" "$ORIG_CPUMASK" "global cpumask restore"
 wqt_eq "$(norm_mask "$(cat "$WQ_SYS/cpumask")")" \
 	"$(norm_mask "$ORIG_CPUMASK")" "global cpumask after restore"
 
