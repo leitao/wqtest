@@ -4,9 +4,11 @@
 #
 # The counterpart of wqtest.h.  The module tests do their checks in
 # module_init() and print the verdict to dmesg; these do theirs against
-# /sys from a shell and print the same verdict to stdout, which test.sh
-# folds into the same window it scans for kernel splats.  So a sysfs write
-# that parses fine but trips a WARN in the kernel still fails the test.
+# /sys from a shell and print the same verdict to both stdout and dmesg,
+# landing in the same window test.sh scans for kernel splats.  So a sysfs
+# write that parses fine but trips a WARN in the kernel still fails the test,
+# and a run watched on the console shows a script test's verdict exactly
+# where it shows a module's.
 #
 # Usage:
 #
@@ -23,23 +25,36 @@ WQT_NAME=""
 WQT_FAILED=0
 WQT_REASON=""
 
+# _wqt_say <loglevel> <line> -- print to stdout and mirror into the kernel
+# log.  A module test reports through printk, so its verdict is on the console
+# of the machine under test; without the mirror a script test would be visible
+# only in the runner's TAP file.  The levels are the ones wqtest.h prints at,
+# so a FAIL is as loud here as it is there.
+#
+# The redirection is inside the group because a failing ">" is reported by the
+# shell itself, before any 2>/dev/null on the same command takes effect.
+_wqt_say() {
+	echo "$2"
+	{ echo "<$1>$2" > /dev/kmsg; } 2>/dev/null
+}
+
 wqt_init() {
 	WQT_ID="$1"
 	WQT_NAME="$2"
 	WQT_FAILED=0
 	WQT_REASON=""
-	echo "# wqt$WQT_ID $WQT_NAME: starting"
+	_wqt_say 6 "# wqt$WQT_ID $WQT_NAME: starting"
 }
 
 # Diagnostic line, prefixed so the runner treats it as a comment.
 wqt_diag() {
-	echo "# wqt$WQT_ID $*"
+	_wqt_say 6 "# wqt$WQT_ID $*"
 }
 
 # Record a failure.  Checks keep running afterwards so a single run reports
 # every problem it finds; the first message becomes the verdict reason.
 wqt_fail() {
-	echo "# wqt$WQT_ID FAIL: $*"
+	_wqt_say 3 "# wqt$WQT_ID FAIL: $*"
 	if [ "$WQT_FAILED" -eq 0 ]; then
 		WQT_FAILED=1
 		WQT_REASON="$*"
@@ -59,9 +74,11 @@ wqt_eq() {
 	[ "$1" = "$2" ] || wqt_fail "$3: got '$1', want '$2'"
 }
 
-# wqt_write <file> <value> <what> -- the write must succeed.
+# wqt_write <file> <value> <what> -- the write must succeed.  A rejected sysfs
+# write is an errno on the redirection, which the shell announces itself, so
+# the group is what keeps "Invalid argument" out of the log.
 wqt_write() {
-	if ! printf '%s' "$2" > "$1" 2>/dev/null; then
+	if ! { printf '%s' "$2" > "$1"; } 2>/dev/null; then
 		wqt_fail "$3: write of '$2' was rejected"
 		return 1
 	fi
@@ -70,7 +87,7 @@ wqt_write() {
 
 # wqt_write_fails <file> <value> <what> -- the write must be rejected.
 wqt_write_fails() {
-	if printf '%s' "$2" > "$1" 2>/dev/null; then
+	if { printf '%s' "$2" > "$1"; } 2>/dev/null; then
 		wqt_fail "$3: write of '$2' was accepted"
 		return 1
 	fi
@@ -80,9 +97,9 @@ wqt_write_fails() {
 # Print the single verdict line test.sh maps to ok/not ok.
 wqt_finish() {
 	if [ "$WQT_FAILED" -ne 0 ]; then
-		echo "WQT-RESULT $WQT_ID $WQT_NAME : FAIL ($WQT_REASON)"
+		_wqt_say 3 "WQT-RESULT $WQT_ID $WQT_NAME : FAIL ($WQT_REASON)"
 	else
-		echo "WQT-RESULT $WQT_ID $WQT_NAME : PASS"
+		_wqt_say 6 "WQT-RESULT $WQT_ID $WQT_NAME : PASS"
 	fi
 	return 0
 }

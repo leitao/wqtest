@@ -37,9 +37,10 @@ echo "             quick=$QUICK"
 #
 # A test is either a module (wqt_NN_*.ko), which reports its verdict to dmesg
 # from module_init(), or a script (wqt_NN_*.sh), which drives /sys from
-# userspace and reports the same verdict on stdout.  Both are judged the same
-# way, and both get the same scan for kernel splats over the window they ran
-# in -- a sysfs write that parses fine but WARNs still fails its test.
+# userspace and reports the same verdict on stdout and to /dev/kmsg.  Both are
+# judged the same way, and both get the same scan for kernel splats over the
+# window they ran in -- a sysfs write that parses fine but WARNs still fails
+# its test.
 tests=$(ls "$DIR"/wqt_[0-9]*.ko "$DIR"/wqt_[0-9]*.sh 2>/dev/null | sort)
 if [ -z "$tests" ]; then
 	echo "Bail out! no wqt_NN_* tests in $DIR -- run ./build.sh first"
@@ -80,9 +81,13 @@ nr=$#
 		sleep 0.5
 
 		log=$(dmesg | sed -n "/$marker/,\$p")
-		# A script reports on stdout; judge it out of the same window.
-		[ -n "$out" ] && log="$log
+		# A script mirrors its verdict into the kernel log, so it is
+		# already in the window above; fall back to its stdout if the
+		# mirror did not make it (no /dev/kmsg, say).
+		if [ -n "$out" ] && ! echo "$log" | grep -q "WQT-RESULT $id"; then
+			log="$log
 $out"
+		fi
 
 		# KFENCE's toggle_allocation_gate idle-waits (wait_event_idle) for
 		# the next sampled allocation; on a mostly-idle VM the WQ watchdog
