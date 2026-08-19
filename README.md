@@ -1,13 +1,16 @@
 # wq_testsuite — Linux workqueue self-tests
 
-A standalone suite of 36 tests for the Linux kernel **workqueue**
-subsystem. Each test is a small out-of-tree kernel module that exercises the
-workqueue API and self-checks its behaviour; a runner boots the target kernel
-under [virtme-ng](https://github.com/arighi/virtme-ng), loads every module, and
+A standalone suite of 39 tests for the Linux kernel **workqueue**
+subsystem. Most are small out-of-tree kernel modules that exercise the
+workqueue API and self-check their behaviour; the last three are shell scripts
+that drive the sysfs interface from userspace. A runner boots the target kernel
+under [virtme-ng](https://github.com/arighi/virtme-ng), runs every test, and
 reports results as [kselftest-style TAP](https://docs.kernel.org/dev-tools/kselftest.html).
 
-Workqueue is a kernel-internal API with no direct userspace surface, so the
-tests have to live in the kernel. Running against a **debug kernel** (KASAN,
+Workqueue is almost entirely a kernel-internal API, so almost all of the tests
+have to live in the kernel. Its one userspace surface is sysfs — there is no
+configfs interface — and tests 37–39 cover that from a shell. Running against a
+**debug kernel** (KASAN,
 `PROVE_LOCKING`, `DEBUG_OBJECTS_WORK`, `WQ_WATCHDOG`) turns those sanitizers
 into a second oracle: a test fails not only on a bad assertion but also on any
 use-after-free, deadlock, double-init/free of a `work_struct`, or stall detected
@@ -18,8 +21,12 @@ while it runs.
 * A built Linux kernel tree with `CONFIG_MODULES=y` (the runner builds modules
   against it and boots it). For meaningful coverage also enable:
   `CONFIG_KASAN`, `CONFIG_PROVE_LOCKING`, `CONFIG_DEBUG_OBJECTS_WORK`,
-  `CONFIG_WQ_WATCHDOG`, and the virtme rootfs bits
+  `CONFIG_WQ_WATCHDOG`, `CONFIG_DEBUG_ATOMIC_SLEEP` (the oracle for `wqt_33`),
+  and the virtme rootfs bits
   (`CONFIG_FUSE_FS`, `CONFIG_VIRTIO_FS`, `CONFIG_OVERLAY_FS`).
+  `CONFIG_SYSFS` is what tests 37–39 need; `CONFIG_HOTPLUG_CPU` is what
+  `wqt_25` and `wqt_35` need. Both skip themselves with a diagnostic if it is
+  off.
 * `virtme-ng` and a matching `qemu-system-<arch>`.
 
 ## Quick start
@@ -54,12 +61,12 @@ builds, `make test` runs, `make run` does both.
 Expected output:
 
 ```
-1..36
+1..39
 ok 1 - basic
 ok 2 - ordered
 ...
-ok 36 - bh_driver_idiom
-# passed 36/36
+ok 39 - sysfs_cpumask
+# passed 39/39
 ALL TESTS PASSED
 ```
 
@@ -106,6 +113,9 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 34| `wqt_34_bh_requeue`    | queueing from inside a BH handler: self-requeue (never nested), a second BH wq, a remote cpu, and a sleepable wq |
 | 35| `wqt_35_bh_hotplug`    | `workqueue_softirq_dead()` drains both BH pools of a cpu being offlined; the re-onlined cpu takes BH work again |
 | 36| `wqt_36_bh_driver_idiom`| hardirq `irq_work` producer → BH consumer (dm-verity idiom); `disable_work_sync`/`enable_and_queue_work` teardown |
+| 37| `wqt_37_sysfs_attrs.sh` | *userspace*: which workqueues appear under the sysfs bus, which attributes they get, and their modes |
+| 38| `wqt_38_sysfs_write.sh` | *userspace*: writes to `max_active`/`nice`/`affinity_scope`/`affinity_strict`, their rejects, and whether `nice` reaches the workers |
+| 39| `wqt_39_sysfs_cpumask.sh`| *userspace*: the per-wq and global unbound cpumasks actually confine the workers; `default_affinity_scope` |
 
 ### Tests 11–16 in detail
 
@@ -327,9 +337,87 @@ these nine cover it on its own terms.
   `disable_work_sync()` while the ISR may still fire, `enable_and_queue_work()`
   to bring it back.
 
+### Tests 37–39: the sysfs interface, from userspace
+
+Workqueue has **no configfs interface**. Its only userspace surface is the
+sysfs bus registered at `core_initcall` by `wq_sysfs_init()`, visible as
+`/sys/devices/virtual/workqueue` (and `/sys/bus/workqueue/devices`):
+
+```
+/sys/devices/virtual/workqueue/
+├── cpumask               RW  global cap on every unbound workqueue
+├── cpumask_requested     RO  the last mask accepted by a write
+├── cpumask_isolated      RO  cpus excluded by isolation
+└── <wq-name>/                only for workqueues created with WQ_SYSFS
+    ├── per_cpu           RO  0 for unbound, 1 for per-cpu
+    ├── max_active        RW  read-only for ordered and BH workqueues
+    ├── nice              RW  ┐
+    ├── cpumask           RW  │ unbound workqueues only
+    ├── affinity_scope    RW  │
+    └── affinity_strict   RW  ┘
+```
+
+Plus `/sys/module/workqueue/parameters/default_affinity_scope`, which supplies
+the scope for every workqueue still set to `default`.
+
+These three are shell scripts rather than modules, so `test.sh` runs them
+directly; they share `wqtest.sh`, the counterpart of `wqtest.h`, and print the
+same `WQT-RESULT` verdict line on stdout. The runner folds that into the same
+dmesg window it scans for splats, so a sysfs write that parses cleanly but
+trips a `WARN` in the kernel still fails its test.
+
+They need workqueues to look at, and the interface only shows workqueues
+created with `WQ_SYSFS`, so **`wqh_sysfs.ko`** provides them: a per-cpu, an
+unbound, an ordered and a highpri one, plus `wqh_hidden` without `WQ_SYSFS` as
+a negative control. It is a helper, not a test — it stays loaded until removed,
+and is deliberately not named `wqt_*` so `test.sh` does not try to run it as
+one. There is no BH workqueue among them: `__WQ_BH_ALLOWS` permits only
+`WQ_HIGHPRI` and `WQ_PERCPU` alongside `WQ_BH`, so `WQ_BH | WQ_SYSFS` is
+rejected outright and a BH workqueue can never appear on the bus.
+
+* **`wqt_37_sysfs_attrs`** — the surface. A `WQ_SYSFS` workqueue appears on the
+  bus when created and is gone after `destroy_workqueue()`; one without the
+  flag never appears. `per_cpu` is read-only and reports 1 only for the per-cpu
+  queue (an ordered workqueue is unbound, so it reads 0). The unbound-only
+  attributes exist on the unbound queues and not on the per-cpu one, and
+  `max_active` is 0644 everywhere except the ordered queue, where
+  `wq_sysfs_is_visible()` demotes it to 0444 because changing it would break
+  the ordering guarantee. Defaults are checked too, including the
+  `default (<resolved>)` form `affinity_scope` reports when unset.
+
+* **`wqt_38_sysfs_write`** — writing. Every store handler parses its own buffer
+  and answers `-EINVAL` rather than taking a garbage value, so `max_active`
+  rejects `0`/`-1`/`abc` (but *clamps* rather than rejects above
+  `WQ_MAX_ACTIVE`), `nice` rejects anything outside `-20..19`, and
+  `affinity_scope` rejects any name `sysfs_match_string()` does not know. A
+  reading back only shows the parse succeeded, so `nice` is also checked for
+  effect: the helper runs a batch and reports the nice its workers ran at.
+  Quirks pinned down: `affinity_strict` casts to bool, so `2` reads back as
+  `1`; a zero-length write never reaches the store handler at all
+  (`sysfs_kf_write()` short-circuits it) and changes nothing; and the ordered
+  workqueue still takes `nice` and the affinity knobs, since only `max_active`
+  is off limits there. That last one is never written to — the file is 0444,
+  but root has `CAP_DAC_OVERRIDE` and the write would reach
+  `workqueue_set_max_active()`, which `WARN`s on an ordered workqueue.
+
+* **`wqt_39_sysfs_cpumask`** — the masks, and whether they bite. Both masks are
+  written in the hex form `cpumask_parse()` takes and read back in the
+  zero-padded, comma-grouped form `%*pb` produces, so the test normalises
+  before comparing. A per-wq cpumask naming one cpu has to put all 64 probe
+  items on that cpu; the global cpumask has to do the same to a workqueue that
+  still asks for every cpu. An empty *global* mask is refused outright, while
+  an empty *per-wq* mask is accepted and
+  `wqattrs_actualize_cpumask()` falls back to the global mask for the pools it
+  builds — so the test asserts only the invariant that survives either
+  behaviour, that the workqueue keeps running work, and reports which way it
+  went. `default_affinity_scope` is walked through every scope and must show up
+  in a workqueue left on `default`; it rejects `default` itself and any unknown
+  name. The global cpumask and `default_affinity_scope` are system-wide, so
+  both are saved on entry and restored from an `EXIT` trap.
+
 ## How a test reports its result
 
-Each module does all its work in `module_init()`, cleans up the workqueues it
+A module test does all its work in `module_init()`, cleans up the workqueues it
 created, prints exactly one verdict line, and returns `-EAGAIN` so it unloads
 itself immediately (matching `lib/test_workqueue.c` in the kernel tree). The
 verdict line is:
@@ -338,6 +426,9 @@ verdict line is:
 WQT-RESULT <id> <name> : PASS
 WQT-RESULT <id> <name> : FAIL (<reason>)
 ```
+
+A script test (37–39) does the same from userspace against `/sys`, using the
+`wqtest.sh` helpers, and prints the identical line on stdout.
 
 `test.sh` maps that (plus a scan for kernel splats in the same window) to an
 `ok`/`not ok` TAP line. `insmod`'s exit status is intentionally ignored (it is
@@ -348,14 +439,27 @@ always non-zero because of the `-EAGAIN`).
 ```
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
 wqt_NN_*.c          the 36 test modules
+wqt_NN_*.sh         the 3 userspace (sysfs) tests
+wqtest.sh           shared PASS/FAIL harness for those (counterpart of wqtest.h)
+wqh_sysfs.c         helper module: the WQ_SYSFS workqueues they poke at
 Kbuild / Makefile   out-of-tree module build
 build.sh            build the modules against $KDIR (host or guest)
-test.sh             in-VM: load each module into the running kernel, emit TAP
+test.sh             in-VM: run every wqt_NN_* test, emit TAP
 ```
 
 ## Adding a test
+
+A kernel-side test:
 
 1. Create `wqt_NN_name.c`, include `"wqtest.h"`, do your checks in
    `module_init()` between `WQT_INIT(NN, "name")` and `return WQT_FINISH();`.
 2. Add `obj-m += wqt_NN_name.o` to `Kbuild`.
 3. (Optional) give it quick/full module params in `test.sh`'s `case "$id"`.
+
+A userspace test:
+
+1. Create an executable `wqt_NN_name.sh`, source `wqtest.sh`, do your checks
+   between `wqt_init NN name` and `wqt_finish`.
+2. Nothing to add to `Kbuild` — `test.sh` picks up `wqt_NN_*.sh` alongside the
+   modules and orders both by `NN`. If it needs workqueues to look at, use
+   `wqh_load`/`wqh_unload` and extend `wqh_sysfs.c`.

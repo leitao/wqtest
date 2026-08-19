@@ -33,12 +33,20 @@ echo "wq_testsuite: kernel $(uname -r) on $(uname -n)"
 echo "             quick=$QUICK"
 [ "$(id -u)" = 0 ] || echo "WARNING: not root -- insmod will fail"
 
-# --- load each module, judge, emit TAP -------------------------------------
-set -- "$DIR"/wqt_*.ko
-if [ ! -e "$1" ]; then
-	echo "Bail out! no wqt_*.ko in $DIR -- run ./build.sh first"
+# --- run each test, judge, emit TAP ----------------------------------------
+#
+# A test is either a module (wqt_NN_*.ko), which reports its verdict to dmesg
+# from module_init(), or a script (wqt_NN_*.sh), which drives /sys from
+# userspace and reports the same verdict on stdout.  Both are judged the same
+# way, and both get the same scan for kernel splats over the window they ran
+# in -- a sysfs write that parses fine but WARNs still fails its test.
+tests=$(ls "$DIR"/wqt_[0-9]*.ko "$DIR"/wqt_[0-9]*.sh 2>/dev/null | sort)
+if [ -z "$tests" ]; then
+	echo "Bail out! no wqt_NN_* tests in $DIR -- run ./build.sh first"
 	exit 2
 fi
+# shellcheck disable=SC2086 # deliberate word splitting: one path per test
+set -- $tests
 nr=$#
 
 {
@@ -46,9 +54,9 @@ nr=$#
 	echo "1..$nr"
 	i=0
 	pass=0
-	for ko in "$@"; do
+	for t in "$@"; do
 		i=$((i + 1))
-		base=$(basename "$ko" .ko)			# wqt_01_basic
+		base=$(basename "$t" .ko); base=$(basename "$base" .sh)
 		id=$(echo "$base" | sed -E 's/^wqt_([0-9]+)_.*/\1/')
 		name=$(echo "$base" | sed -E 's/^wqt_[0-9]+_//')
 
@@ -63,11 +71,18 @@ nr=$#
 		echo "# --- $base ${params:+($params)} ---"
 		marker="WQTMARK-$id-$$"
 		echo "$marker" > /dev/kmsg 2>/dev/null
-		# -EAGAIN return makes insmod exit non-zero: intentional, ignore.
-		insmod "$ko" $params 2>/dev/null
+		out=""
+		case "$t" in
+		*.ko)	# -EAGAIN makes insmod exit non-zero: intentional, ignore.
+			insmod "$t" $params 2>/dev/null ;;
+		*.sh)	out=$(sh "$t" 2>&1) ;;
+		esac
 		sleep 0.5
 
 		log=$(dmesg | sed -n "/$marker/,\$p")
+		# A script reports on stdout; judge it out of the same window.
+		[ -n "$out" ] && log="$log
+$out"
 
 		# KFENCE's toggle_allocation_gate idle-waits (wait_event_idle) for
 		# the next sampled allocation; on a mostly-idle VM the WQ watchdog

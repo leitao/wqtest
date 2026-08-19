@@ -41,3 +41,7 @@ obj-m += wqt_33_bh_cancel.o
 obj-m += wqt_34_bh_requeue.o
 obj-m += wqt_35_bh_hotplug.o
 obj-m += wqt_36_bh_driver_idiom.o
+
+# Not a test: the workqueues the userspace sysfs tests (wqt_37..39) poke at.
+# Deliberately not named wqt_* so test.sh does not try to run it as one.
+obj-m += wqh_sysfs.o
