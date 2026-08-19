@@ -1,6 +1,6 @@
 # wq_testsuite — Linux workqueue self-tests
 
-A standalone suite of 27 tests for the Linux kernel **workqueue**
+A standalone suite of 36 tests for the Linux kernel **workqueue**
 subsystem. Each test is a small out-of-tree kernel module that exercises the
 workqueue API and self-checks its behaviour; a runner boots the target kernel
 under [virtme-ng](https://github.com/arighi/virtme-ng), loads every module, and
@@ -54,12 +54,12 @@ builds, `make test` runs, `make run` does both.
 Expected output:
 
 ```
-1..27
+1..36
 ok 1 - basic
 ok 2 - ordered
 ...
-ok 27 - percpu_lifecycle
-# passed 27/27
+ok 36 - bh_driver_idiom
+# passed 36/36
 ALL TESTS PASSED
 ```
 
@@ -97,6 +97,15 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 25| `wqt_25_nr_active_paths`| `max_active` raise/lower and a cpu offline/online with work in flight, per-cpu and unbound |
 | 26| `wqt_26_pool_backing`  | a workqueue is served by the kind of pool its flags ask for: per-cpu vs unbound, normal vs highpri, task vs softirq |
 | 27| `wqt_27_percpu_lifecycle`| repeated create/destroy of per-cpu, highpri, BH and unbound queues, some torn down with work still queued |
+| 28| `wqt_28_bh_basic`      | `WQ_BH` and `WQ_BH \| WQ_HIGHPRI`, private and system: every item runs once, in softirq, on the queueing cpu |
+| 29| `wqt_29_bh_ordering`   | BH items run in queueing order and never overlap, including across two BH wqs sharing one cpu's pool |
+| 30| `wqt_30_bh_softirq_gate`| `local_bh_disable()` holds a BH item pending; the outermost `local_bh_enable()` runs it; a remote cpu is kicked by irq_work |
+| 31| `wqt_31_bh_highpri`    | `WQ_BH \| WQ_HIGHPRI` drains on HI_SOFTIRQ, ahead of a normal BH batch queued before it |
+| 32| `wqt_32_bh_delayed`    | `queue_delayed_work[_on]`, `mod_delayed_work`, `flush_delayed_work`, `cancel_delayed_work_sync` on a BH wq |
+| 33| `wqt_33_bh_cancel`     | `cancel_work_sync`/`disable_work_sync` on BH work from atomic context; `disable_work` depth; `enable_and_queue_work` |
+| 34| `wqt_34_bh_requeue`    | queueing from inside a BH handler: self-requeue (never nested), a second BH wq, a remote cpu, and a sleepable wq |
+| 35| `wqt_35_bh_hotplug`    | `workqueue_softirq_dead()` drains both BH pools of a cpu being offlined; the re-onlined cpu takes BH work again |
+| 36| `wqt_36_bh_driver_idiom`| hardirq `irq_work` producer → BH consumer (dm-verity idiom); `disable_work_sync`/`enable_and_queue_work` teardown |
 
 ### Tests 11–16 in detail
 
@@ -237,6 +246,87 @@ workqueues — one idiom per test, each citing the code it mirrors:
   debugobjects or lockdep rather than in an assertion. `rounds=` sets the
   create/destroy count per variant (default 24).
 
+### Tests 28–36: BH workqueues
+
+A `WQ_BH` workqueue is a convenience interface to softirq, added as the
+replacement for tasklets. It is always per-cpu, takes `0` `max_active`, allows
+only `WQ_HIGHPRI` on top of `WQ_BH`, and runs every item in the queueing cpu's
+softirq context in the queueing order. Its items cannot sleep; everything else
+— delayed queueing, flushing, cancelling — is supported. The rest of the suite
+touches BH only in passing (24, 26, 27 include it in their flag matrices);
+these nine cover it on its own terms.
+
+* **`wqt_28_bh_basic`** — the execution contract, for four workqueues: a
+  private `WQ_BH`, a private `WQ_BH | WQ_HIGHPRI`, `system_bh_wq` and
+  `system_bh_highpri_wq`. One item per online cpu on each: it runs exactly
+  once, with `in_serving_softirq()` and not `in_hardirq()`, on the cpu it was
+  queued to. `queue_work()` without a cpu is checked separately, because "the
+  queueing cpu" is the contract there.
+
+* **`wqt_29_bh_ordering`** — ordering is a property of the *pool*, not of the
+  workqueue: every non-highpri BH wq on a cpu is served by that cpu's single BH
+  pool, so a second phase queues alternately to two BH workqueues and the batch
+  must still come out in one FIFO. A shared live counter must never exceed one,
+  since a BH pool has a single execution context per cpu. Everything is queued
+  with softirqs off so the whole batch is on the worklist before any of it runs.
+
+* **`wqt_30_bh_softirq_gate`** — the softirq gate is the execution gate. An item
+  queued locally while softirqs are off stays pending and runs before
+  `local_bh_enable()` returns — there is no worker to wake. Nesting is honoured:
+  only the outermost enable opens the gate. Queueing to a *remote* cpu from the
+  same section takes the other kick path, since `kick_bh_pool()` cannot raise a
+  softirq on another cpu and sends an irq_work instead.
+
+* **`wqt_31_bh_highpri`** — on a BH workqueue `WQ_HIGHPRI` does not mean a
+  negative-nice worker; there is no worker. It selects the cpu's second BH pool,
+  driven by `HI_SOFTIRQ` (bit 0) rather than `TASKLET_SOFTIRQ` (bit 6). The
+  normal batch is queued *first*, so queueing order would put it first and pool
+  order puts the highpri batch first.
+
+* **`wqt_32_bh_delayed`** — delayed queueing runs through a second deferral
+  layer: the timer is armed on a housekeeping cpu and `delayed_work_timer_fn()`,
+  itself in softirq, queues to `dwork->cpu`. The handoff has to preserve both
+  the target cpu and the BH context, on top of the timing contract `wqt_04`
+  checks for a normal wq.
+
+* **`wqt_33_bh_cancel`** — `cancel_work_sync()` normally has to sleep, so BH is
+  the exception: `__flush_work()` spots the `WORK_OFFQ_BH` tag the pool left in
+  `work->data` and busy-waits instead, which is what makes it callable "from
+  non-hardirq atomic contexts including BH". Driven once from a
+  softirq-disabled section and once from inside a BH handler cancelling the item
+  queued behind it. On a `DEBUG_ATOMIC_SLEEP` kernel a regression here shows up
+  as "sleeping function called from invalid context", so the splat scan is a
+  second oracle. Also covers `disable_work()` depth and
+  `enable_and_queue_work()`.
+
+* **`wqt_34_bh_requeue`** — four destinations from inside a BH handler: itself
+  (which must never nest), a second BH wq on the same pool, a remote cpu, and a
+  normal per-cpu wq — the handoff a BH item has to make when the work needs to
+  sleep. The chain is finite on purpose: `is_chained_work()` identifies a worker
+  by `PF_WQ_WORKER` on `current`, which no BH item has, so a requeue from a BH
+  handler during `drain_workqueue()` (and therefore `destroy_workqueue()`) is
+  not recognised as chained work and is dropped with a WARN.
+
+* **`wqt_35_bh_hotplug`** — a BH pool has no worker to keep across an offline
+  and nothing will raise its softirq again, so `CPUHP_SOFTIRQ_DEAD` drains it by
+  hand: `workqueue_softirq_dead()` runs the dead pool's `bh_worker()` from a
+  live cpu and waits. By the time `remove_cpu()` returns every BH item queued to
+  that cpu has run, and the drained ones ran on *another* cpu — the one place a
+  BH item does not run where it was queued. The batch is sized to outlast the
+  offline (queueing is much cheaper than running, so the backlog builds while it
+  is queued); the test fails if nothing came out of the drain, because then it
+  stopped covering the path. Needs `CONFIG_HOTPLUG_CPU` and a second cpu.
+
+* **`wqt_36_bh_driver_idiom`** — what `WQ_BH` was added for. A completion
+  arrives in hardirq and the driver defers the short non-sleeping part to
+  softirq: `drivers/md/dm-verity-target.c` (`verity_end_io()` →
+  `queue_work(system_bh_wq, &io->work)`), `dm-crypt`, and a row of media and
+  mailbox ISRs. The producer is an `irq_work` initialised with
+  `IRQ_WORK_INIT_HARD()` so it really runs in hardirq. The second half is the
+  teardown idiom from `drivers/media/pci/smipcie` and mantis:
+  `disable_work_sync()` while the ISR may still fire, `enable_and_queue_work()`
+  to bring it back.
+
 ## How a test reports its result
 
 Each module does all its work in `module_init()`, cleans up the workqueues it
@@ -257,7 +347,7 @@ always non-zero because of the `-EAGAIN`).
 
 ```
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
-wqt_NN_*.c          the 25 test modules
+wqt_NN_*.c          the 36 test modules
 Kbuild / Makefile   out-of-tree module build
 build.sh            build the modules against $KDIR (host or guest)
 test.sh             in-VM: load each module into the running kernel, emit TAP
