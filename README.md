@@ -1,15 +1,15 @@
 # wq_testsuite — Linux workqueue self-tests
 
-A standalone suite of 39 tests for the Linux kernel **workqueue**
+A standalone suite of 40 tests for the Linux kernel **workqueue**
 subsystem. Most are small out-of-tree kernel modules that exercise the
-workqueue API and self-check their behaviour; the last three are shell scripts
-that drive the sysfs interface from userspace. A runner boots the target kernel
+workqueue API and self-check their behaviour; the sysfs tests are shell scripts
+that drive the interface from userspace. A runner boots the target kernel
 under [virtme-ng](https://github.com/arighi/virtme-ng), runs every test, and
 reports results as [kselftest-style TAP](https://docs.kernel.org/dev-tools/kselftest.html).
 
 Workqueue is almost entirely a kernel-internal API, so almost all of the tests
 have to live in the kernel. Its one userspace surface is sysfs — there is no
-configfs interface — and tests 37–39 cover that from a shell. Running against a
+configfs interface — and tests 37–40 cover that from a shell. Running against a
 **debug kernel** (KASAN,
 `PROVE_LOCKING`, `DEBUG_OBJECTS_WORK`, `WQ_WATCHDOG`) turns those sanitizers
 into a second oracle: a test fails not only on a bad assertion but also on any
@@ -24,7 +24,7 @@ while it runs.
   `CONFIG_WQ_WATCHDOG`, `CONFIG_DEBUG_ATOMIC_SLEEP` (the oracle for `wqt_33`),
   and the virtme rootfs bits
   (`CONFIG_FUSE_FS`, `CONFIG_VIRTIO_FS`, `CONFIG_OVERLAY_FS`).
-  `CONFIG_SYSFS` is what tests 37–39 need; `CONFIG_HOTPLUG_CPU` is what
+  `CONFIG_SYSFS` is what tests 37–40 need; `CONFIG_HOTPLUG_CPU` is what
   `wqt_25` and `wqt_35` need. Both skip themselves with a diagnostic if it is
   off.
 * `virtme-ng` and a matching `qemu-system-<arch>`.
@@ -61,12 +61,12 @@ builds, `make test` runs, `make run` does both.
 Expected output:
 
 ```
-1..39
+1..40
 ok 1 - basic
 ok 2 - ordered
 ...
-ok 39 - sysfs_cpumask
-# passed 39/39
+ok 40 - sysfs_max_active_domains
+# passed 40/40
 ALL TESTS PASSED
 ```
 
@@ -116,6 +116,7 @@ The clean TAP is also written to `results.tap`; the full console log is in
 | 37| `wqt_37_sysfs_attrs.sh` | *userspace*: which workqueues appear under the sysfs bus, which attributes they get, and their modes |
 | 38| `wqt_38_sysfs_write.sh` | *userspace*: writes to `max_active`/`nice`/`affinity_scope`/`affinity_strict`, their rejects, and whether `nice` reaches the workers |
 | 39| `wqt_39_sysfs_cpumask.sh`| *userspace*: the per-wq and global unbound cpumasks actually confine the workers; `default_affinity_scope` |
+| 40| `wqt_40_sysfs_max_active_domains.sh`| *userspace*: `max_active` readback stays in the active accounting domain for per-cpu and unbound workqueues |
 
 ### Tests 11–16 in detail
 
@@ -337,7 +338,7 @@ these nine cover it on its own terms.
   `disable_work_sync()` while the ISR may still fire, `enable_and_queue_work()`
   to bring it back.
 
-### Tests 37–39: the sysfs interface, from userspace
+### Tests 37–40: the sysfs interface, from userspace
 
 Workqueue has **no configfs interface**. Its only userspace surface is the
 sysfs bus registered at `core_initcall` by `wq_sysfs_init()`, visible as
@@ -360,7 +361,7 @@ sysfs bus registered at `core_initcall` by `wq_sysfs_init()`, visible as
 Plus `/sys/module/workqueue/parameters/default_affinity_scope`, which supplies
 the scope for every workqueue still set to `default`.
 
-These three are shell scripts rather than modules, so `test.sh` runs them
+These tests are shell scripts rather than modules, so `test.sh` runs them
 directly; they share `wqtest.sh`, the counterpart of `wqtest.h`, and print the
 same `WQT-RESULT` verdict line on stdout. The runner folds that into the same
 dmesg window it scans for splats, so a sysfs write that parses cleanly but
@@ -415,6 +416,15 @@ rejected outright and a BH workqueue can never appear on the bus.
   name. The global cpumask and `default_affinity_scope` are system-wide, so
   both are saved on entry and restored from an `EXIT` trap.
 
+* **`wqt_40_sysfs_max_active_domains`** — the `max_active` value users see
+  stays in the workqueue's active accounting domain. Per-cpu workqueues keep a
+  scaled unbound-side shadow limit and unbound workqueues keep a per-cpu shadow
+  limit, but `/sys/.../max_active` must report the value that the user set for
+  the queue's actual domain. The test checks the creation-time defaults, writes
+  per-cpu and unbound values that differ from their scaled shadows on a
+  multi-CPU guest, verifies clamping/rejects on the per-cpu file, and runs a
+  helper batch after the writes so a bad store path also shows up as lost work.
+
 ## How a test reports its result
 
 A module test does all its work in `module_init()`, cleans up the workqueues it
@@ -427,7 +437,7 @@ WQT-RESULT <id> <name> : PASS
 WQT-RESULT <id> <name> : FAIL (<reason>)
 ```
 
-A script test (37–39) does the same from userspace against `/sys`, using the
+A script test (37–40) does the same from userspace against `/sys`, using the
 `wqtest.sh` helpers, and prints the identical line on stdout.
 
 `test.sh` maps that (plus a scan for kernel splats in the same window) to an
@@ -439,7 +449,7 @@ always non-zero because of the `-EAGAIN`).
 ```
 wqtest.h            shared PASS/FAIL harness (WQT_INIT / WQT_CHECK / WQT_FINISH)
 wqt_NN_*.c          the 36 test modules
-wqt_NN_*.sh         the 3 userspace (sysfs) tests
+wqt_NN_*.sh         the 4 userspace (sysfs) tests
 wqtest.sh           shared PASS/FAIL harness for those (counterpart of wqtest.h)
 wqh_sysfs.c         helper module: the WQ_SYSFS workqueues they poke at
 Kbuild / Makefile   out-of-tree module build
